@@ -37,15 +37,25 @@ def main():
     error_code = 0 if request.request_api_version in [0, 1, 2, 3, 4] else 35
     message = Message(
         request.correlation_id.to_bytes(4, byteorder="big"),
-        # API Version Response | Ref.: https://kafka.apache.org/protocol.html#The_Messages_ApiVersions
+        # ApiVersion V3 Response | Ref.: https://kafka.apache.org/protocol.html#The_Messages_ApiVersions
+        # error_code [api_keys] throttle_time_ms TAG_BUFFER
         # error_code INT16
         error_code.to_bytes(2, byteorder="big") +
+        # num_api_keys => empirically VARINT of N + 1 for COMPACT_ARRAY
+        # 255 / 11111111 => 126
+        # 127 / 01111111 => 126
+        #  63 / 00111111 =>  62
+        int(1 + 1).to_bytes(1, byteorder="big") +
         # api_key INT16
         int(18).to_bytes(2, byteorder="big") +
         # min_version INT16
         int(4).to_bytes(2, byteorder="big") +
         # max_version INT16
-        int(4).to_bytes(2, byteorder="big")
+        int(4).to_bytes(2, byteorder="big") +
+        # TAG_BUFFER -> empirically INT16
+        int(0).to_bytes(2, byteorder="big") +
+        # throttle_time_ms INT32
+        int(0).to_bytes(4, byteorder="big")
     )
     print(f"Sending message: {message.to_bytes().hex()}")
     socket.sendall(message.to_bytes())
