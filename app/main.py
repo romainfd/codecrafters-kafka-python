@@ -6,6 +6,7 @@ class Message:
     body: bytes
 
     def __init__(self, header: bytes, body: bytes):
+        self.size = len(header + body)
         self.header = header
         self.request_api_key = int.from_bytes(header[:2], byteorder="big")
         self.request_api_version = int.from_bytes(header[2:4], byteorder="big")
@@ -15,7 +16,12 @@ class Message:
         self.body = body
 
     def to_bytes(self):
-        return len(self.header + self.body).to_bytes(4, byteorder="big") + self.header + self.body
+        return self.size.to_bytes(4, byteorder="big") + self.header + self.body
+
+    def __repr__(self):
+        return (f"{self.size} | "
+                f"{self.request_api_key} - {self.request_api_version} - {self.correlation_id} - {self.client_id} | "
+                f"{self.body}")
 
 
 def main():
@@ -27,7 +33,8 @@ def main():
     data = socket.recv(1024)
     print(f"Received data: {data}")
     request = Message(data[4:], b'')
-    message = Message(request.correlation_id.to_bytes(4, byteorder="big"), int(35).to_bytes(2, byteorder="2"))
+    print(f"Received request: {request}")
+    message = Message(request.correlation_id.to_bytes(4, byteorder="big"), int(35).to_bytes(2, byteorder="big"))
     print(f"Sending message: {message.to_bytes().hex()}")
     socket.sendall(message.to_bytes())
 
