@@ -34,7 +34,19 @@ def main():
     print(f"Received data: {data}")
     request = Message(data[4:], b'')
     print(f"Received request: {request}")
-    message = Message(request.correlation_id.to_bytes(4, byteorder="big"), int(35).to_bytes(2, byteorder="big"))
+    error_code = 0 if request.request_api_version in [0, 1, 2, 3, 4] else 35
+    message = Message(
+        request.correlation_id.to_bytes(4, byteorder="big"),
+        # API Version Response | Ref.: https://kafka.apache.org/protocol.html#The_Messages_ApiVersions
+        # error_code INT16
+        error_code.to_bytes(2, byteorder="big") +
+        # api_key INT16
+        int(18).to_bytes(2, byteorder="big") +
+        # min_version INT16
+        int(4).to_bytes(2, byteorder="big") +
+        # max_version INT16
+        int(4).to_bytes(2, byteorder="big")
+    )
     print(f"Sending message: {message.to_bytes().hex()}")
     socket.sendall(message.to_bytes())
 
