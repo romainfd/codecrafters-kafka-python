@@ -192,7 +192,7 @@ def main():
             0
         )
     )
-    print(f"Sending message: {message.to_bytes().hex()}")
+    print(f"Sending message: {message} as {message.to_bytes().hex()}")
     socket.sendall(message.to_bytes())
 
 
