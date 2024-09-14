@@ -50,17 +50,29 @@ class RequestHeaderV2(Header):
     #   request_api_version => INT16
     #   correlation_id => INT32
     #   client_id => NULLABLE_STRING
+    # NULLABLE_STRING: Represents a sequence of characters or null.
+    # For non-null strings, first the length N is given as an INT16. Then N bytes follow = UTF-8 character sequence.
+    # A null value is encoded with length of -1 and there are no following bytes.
+    client_id_length_index = 2 + 2 + 4
 
     def __post_init__(self):
         self.request_api_key = int.from_bytes(self._bytes[:2], byteorder="big")
         self.request_api_version = int.from_bytes(self._bytes[2:4], byteorder="big")
         self.correlation_id = int.from_bytes(self._bytes[4:8], byteorder="big")
-        self.client_id = int.from_bytes(self._bytes[8:], byteorder="big")
+        self.client_id_length = self.get_client_id_length(self._bytes)
+        self.client_id = int.from_bytes(self._bytes[10:10 + self.client_id_length], byteorder="big")
         # No tagged fields for this challenge | Ref.: https://app.codecrafters.io/courses/kafka/stages/wa6
-        self.tagged_fields = b''
+        self.tagged_fields = self._bytes[10 + self.client_id_length:]
+
+    @staticmethod
+    def get_client_id_length(header_bytes):
+        client_id_length = int.from_bytes(
+            header_bytes[RequestHeaderV2.client_id_length_index:RequestHeaderV2.client_id_length_index + 2])
+        return 0 if client_id_length == -1 else client_id_length
 
     def __repr__(self):
-        return f"{self.request_api_key} - {self.request_api_version} - {self.correlation_id} - {self.client_id}"
+        return (f"{self.request_api_key} - {self.request_api_version} - {self.correlation_id} - "
+                f"{self.client_id} (len = {self.client_id_length}) - {self.tagged_fields}")
 
 
 @dataclass
@@ -87,6 +99,7 @@ class ResponseHeaderV1(Header):
     # Response Header v0 => correlation_id TAG_BUFFER
     #   correlation_id => INT32
     correlation_id: int
+
     # ToDo: handle TAG_BUFFER
 
     def __init__(self, correlation_id):
@@ -108,10 +121,12 @@ class RequestV2(Message):
     def __init__(self, _bytes):
         self._bytes = _bytes
         size = int.from_bytes(self._bytes[:4], byteorder='big')
+        client_id_length = RequestHeaderV2.get_client_id_length(self._bytes[4:])
+        header_end_index = 4 + RequestHeaderV2.client_id_length_index + 2 + client_id_length
         super().__init__(
             size,
-            RequestHeaderV2(self._bytes[4:]),
-            Content(b'')
+            RequestHeaderV2(self._bytes[4:header_end_index]),
+            Content(self._bytes[header_end_index:])
         )
 
 
@@ -128,6 +143,7 @@ class APIKeysV3:
     api_key: int
     min_version: int
     max_version: int
+
     # no TAG_BUFFER in this challenge
 
     def to_bytes(self):
