@@ -36,7 +36,7 @@ class Message:
         return self.size.to_bytes(4, byteorder="big") + self.header.to_bytes() + self.content.to_bytes()
 
     def __repr__(self):
-        return (f"Message: {self.to_bytes()}\n"
+        return (f"Message: {self.to_bytes().hex()}\n"
                 f"\tSize: {self.size}\n"
                 f"\tHeader: {self.header}\n"
                 f"\tContent: {self.content}")
@@ -72,7 +72,7 @@ class RequestHeaderV2(Header):
 
     def __repr__(self):
         return (f"{self.request_api_key} - {self.request_api_version} - {self.correlation_id} - "
-                f"{self.client_id} (len = {self.client_id_length}) - {self.tagged_fields}")
+                f"{self.client_id} (len = {self.client_id_length}) - {self.tagged_fields.hex()}")
 
 
 @dataclass
@@ -96,18 +96,16 @@ class ResponseHeaderV0(Header):
 @dataclass
 class ResponseHeaderV1(Header):
     # Ref.: https://kafka.apache.org/protocol.html#protocol_messages
-    # Response Header v0 => correlation_id TAG_BUFFER
+    # Response Header v1 => correlation_id TAG_BUFFER
     #   correlation_id => INT32
     correlation_id: int
-
-    # ToDo: handle TAG_BUFFER
 
     def __init__(self, correlation_id):
         self.correlation_id = correlation_id
         super().__init__(self.to_bytes())
 
     def to_bytes(self):
-        return self.correlation_id.to_bytes(4, byteorder="big")
+        return self.correlation_id.to_bytes(4, byteorder="big") + TAG_BUFFER
 
     def __repr__(self):
         return f"{self.correlation_id}"
@@ -167,7 +165,7 @@ class APIVersionsResponseV3(Content):
     throttle_time_ms: int
 
     def __post_init__(self):
-        self.api_keys_num = len(self.api_keys)
+        self.api_keys_num = len(self.api_keys) + (len(self.api_keys) > 0)  # stored as 0 for 0 or N + 1 else
         self._bytes = self.to_bytes()
 
     def to_bytes(self):
@@ -175,11 +173,48 @@ class APIVersionsResponseV3(Content):
         # 255 / 11111111 => 126
         # 127 / 01111111 => 126
         #  63 / 00111111 =>  62
-        # TAG_BUFFER -> empirically INT16
         return self.error_code.to_bytes(2, byteorder="big") + \
-            (self.api_keys_num + 1).to_bytes(1, byteorder="big") + \
+            self.api_keys_num.to_bytes(1, byteorder="big") + \
             b''.join(map(lambda k: k.to_bytes(), self.api_keys)) + \
             self.throttle_time_ms.to_bytes(4, byteorder="big") + \
+            TAG_BUFFER
+
+
+@dataclass
+class FetchResponseV16(Content):
+    # Ref.: https://kafka.apache.org/protocol.html#The_Messages_Fetch
+    # Fetch Response (Version: 16) => throttle_time_ms error_code session_id [responses] TAG_BUFFER
+    #   throttle_time_ms => INT32
+    #   error_code => INT16
+    #   session_id => INT32
+    #   responses => topic_id [partitions] TAG_BUFFER
+    #     topic_id => UUID
+    #     partitions => partition_index error_code high_watermark last_stable_offset log_start_offset [aborted_transactions] preferred_read_replica records TAG_BUFFER
+    #       partition_index => INT32
+    #       error_code => INT16
+    #       high_watermark => INT64
+    #       last_stable_offset => INT64
+    #       log_start_offset => INT64
+    #       aborted_transactions => producer_id first_offset TAG_BUFFER
+    #         producer_id => INT64
+    #         first_offset => INT64
+    #       preferred_read_replica => INT32
+    #       records => COMPACT_RECORDS
+    throttle_time_ms: int
+    error_code: int
+    session_id: int
+    responses: list[object]
+
+    def __post_init__(self):
+        self.responses_num = len(self.responses) + (len(self.responses) > 0)  # stored as 0 for 0 or N + 1 else
+        self._bytes = self.to_bytes()
+
+    def to_bytes(self):
+        return self.throttle_time_ms.to_bytes(4, byteorder="big") + \
+            self.error_code.to_bytes(2, byteorder="big") + \
+            self.session_id.to_bytes(4, byteorder="big") + \
+            self.responses_num.to_bytes(1, byteorder="big") + \
+            b''.join(map(lambda k: k.to_bytes(), self.responses)) + \
             TAG_BUFFER
 
 
@@ -194,22 +229,38 @@ def main():
     request = RequestV2(data)
     print(f"Received request: {request}")
     # Error codes | Ref.: https://kafka.apache.org/protocol.html#protocol_error_codes
-    error_code = 0 if request.header.request_api_version in [0, 1, 2, 3, 4] else 35
-    message = Message(
-        None,
-        ResponseHeaderV0(request.header.correlation_id),
-        APIVersionsResponseV3(
+    # Request API key | Ref.: https://kafka.apache.org/protocol.html#protocol_api_keys
+    if request.header.request_api_key == 18:  # API Versions
+        error_code = 0 if request.header.request_api_version in range(4 + 1) else 35
+        header = ResponseHeaderV0(request.header.correlation_id)
+        content = APIVersionsResponseV3(
             b'',
             error_code,
             [
-                APIKeysV3(18, 4, 4),  # APIVersions
+                APIKeysV3(18, 4, 4),  # API Versions
                 APIKeysV3(1, 16, 16),  # Fetch
             ],
             0
         )
+    elif request.header.request_api_key == 1:  # Fetch
+        error_code = 0 if request.header.request_api_version in range(16 + 1) else 35
+        header = ResponseHeaderV1(request.header.correlation_id)
+        content = FetchResponseV16(
+            b'',
+            1,
+            error_code,
+            0,
+            []
+        )
+    else:
+        raise NotImplementedError
+    response = Message(
+        None,
+        header,
+        content
     )
-    print(f"Sending message: {message} as {message.to_bytes().hex()}")
-    socket.sendall(message.to_bytes())
+    print(f"Sending message: {response} as {response.to_bytes().hex()}")
+    socket.sendall(response.to_bytes())
 
 
 if __name__ == "__main__":
