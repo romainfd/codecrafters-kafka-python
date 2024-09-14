@@ -115,6 +115,9 @@ class RequestV2(Message):
         )
 
 
+TAG_BUFFER = int(0).to_bytes(1, byteorder="big")  # Empirically...
+
+
 @dataclass
 class APIKeysV3:
     # Ref.: https://kafka.apache.org/protocol.html#The_Messages_ApiVersions
@@ -131,7 +134,7 @@ class APIKeysV3:
         return self.api_key.to_bytes(2, byteorder="big") + \
             self.min_version.to_bytes(2, byteorder="big") + \
             self.max_version.to_bytes(2, byteorder="big") + \
-            b''
+            TAG_BUFFER
 
     def __repr__(self):
         return f"API key = {self.api_key} [{self.min_version} => {self.max_version}]"
@@ -146,7 +149,6 @@ class APIVersionsResponseV3(Content):
     error_code: int
     api_keys: list[APIKeysV3]
     throttle_time_ms: int
-    tag_buffer: int  # empirically INT16
 
     def __post_init__(self):
         self.api_keys_num = len(self.api_keys)
@@ -162,7 +164,7 @@ class APIVersionsResponseV3(Content):
             (self.api_keys_num + 1).to_bytes(1, byteorder="big") + \
             b''.join(map(lambda k: k.to_bytes(), self.api_keys)) + \
             self.throttle_time_ms.to_bytes(4, byteorder="big") + \
-            self.tag_buffer.to_bytes(2, byteorder="big")
+            TAG_BUFFER
 
 
 def main():
@@ -175,6 +177,7 @@ def main():
     print(f"Received data: {data}")
     request = RequestV2(data)
     print(f"Received request: {request}")
+    # Error codes | Ref.: https://kafka.apache.org/protocol.html#protocol_error_codes
     error_code = 0 if request.header.request_api_version in [0, 1, 2, 3, 4] else 35
     message = Message(
         None,
@@ -182,8 +185,10 @@ def main():
         APIVersionsResponseV3(
             b'',
             error_code,
-            [APIKeysV3(18, 4, 4)],
-            0,
+            [
+                APIKeysV3(18, 4, 4),  # APIVersions
+                APIKeysV3(1, 16, 16),  # Fetch
+            ],
             0
         )
     )
