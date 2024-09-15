@@ -1,6 +1,7 @@
 from socket import create_server
 from dataclasses import dataclass
 from typing import Optional
+from uuid import UUID
 
 
 # API Key => [supported versions] mapping for our Kafka implementation
@@ -23,12 +24,20 @@ SUPPORTED_API_KEYS = {
 TAG_BUFFER = int(0).to_bytes(1, byteorder="big")
 
 
+def get_size_representation(arr):
+    # stored as 0 for 0 or N + 1 else
+    return len(arr) + (len(arr) > 0)
+
+
 @dataclass
 class Header:
     _bytes: bytes
 
     def to_bytes(self) -> bytes:
         return self._bytes
+
+    def __repr__(self):
+        return self._bytes.hex()
 
 
 @dataclass
@@ -37,6 +46,9 @@ class Content:
 
     def to_bytes(self) -> bytes:
         return self._bytes
+
+    def __repr__(self):
+        return self._bytes.hex()
 
 
 @dataclass
@@ -70,9 +82,6 @@ class RequestHeaderV2(Header):
     #   request_api_version => INT16
     #   correlation_id => INT32
     #   client_id => NULLABLE_STRING
-    # NULLABLE_STRING: Represents a sequence of characters or null.
-    # For non-null strings, first the length N is given as an INT16. Then N bytes follow = UTF-8 character sequence.
-    # A null value is encoded with length of -1 and there are no following bytes.
     client_id_length_index = 2 + 2 + 4
 
     def __post_init__(self):
@@ -85,6 +94,9 @@ class RequestHeaderV2(Header):
 
     @staticmethod
     def get_client_id_length(header_bytes):
+        # NULLABLE_STRING: Represents a sequence of characters or null.
+        # For non-null strings, first the length N is given as an INT16. Then N bytes follow = UTF-8 character sequence.
+        # A null value is encoded with length of -1 and there are no following bytes.
         client_id_length = int.from_bytes(
             header_bytes[RequestHeaderV2.client_id_length_index:RequestHeaderV2.client_id_length_index + 2])
         return 0 if client_id_length == -1 else client_id_length
@@ -139,7 +151,7 @@ class RequestV2(Message):
         self._bytes = _bytes
         size = int.from_bytes(self._bytes[:4], byteorder='big')
         client_id_length = RequestHeaderV2.get_client_id_length(self._bytes[4:])
-        header_end_index = 4 + RequestHeaderV2.client_id_length_index + 2 + client_id_length
+        header_end_index = 4 + RequestHeaderV2.client_id_length_index + 2 + client_id_length + 1  # No TAG: +1 for num=0
         super().__init__(
             size,
             RequestHeaderV2(self._bytes[4:header_end_index]),
@@ -148,20 +160,56 @@ class RequestV2(Message):
 
 
 @dataclass
-class FetchRequestV16(Message):
-    _bytes: bytes
-    header: RequestHeaderV2
+class Topic:
+    # Ref.: https://kafka.apache.org/protocol.html#The_Messages_Fetch
+    # topics = > topic_id [partitions] TAG_BUFFER
+    #     topic_id => UUID
+    #     partitions => partition current_leader_epoch fetch_offset last_fetched_epoch log_start_offset partition_max_bytes TAG_BUFFER
+    #       partition => INT32
+    #       current_leader_epoch => INT32
+    #       fetch_offset => INT64
+    #       last_fetched_epoch => INT32
+    #       log_start_offset => INT64
+    #       partition_max_bytes => INT32
+    topic_id: UUID
 
     def __init__(self, _bytes):
-        self._bytes = _bytes
-        size = int.from_bytes(self._bytes[:4], byteorder='big')
-        client_id_length = RequestHeaderV2.get_client_id_length(self._bytes[4:])
-        header_end_index = 4 + RequestHeaderV2.client_id_length_index + 2 + client_id_length
+        # UUID is 16 bytes
+        self.topic_id = UUID(bytes=_bytes[:16])
+
+
+@dataclass
+class FetchRequestV16(RequestV2):
+    # ToDo: should be moved to Content !
+    topics: list[Topic]
+
+    def __init__(self, _bytes):
         super().__init__(
-            size,
-            RequestHeaderV2(self._bytes[4:header_end_index]),
-            Content(self._bytes[header_end_index:])
+            _bytes
         )
+        # Specify Content in more details
+        # Ref.: https://kafka.apache.org/protocol.html#The_Messages_Fetch
+        # Fetch Request (Version: 16) => max_wait_ms min_bytes max_bytes isolation_level session_id session_epoch [topics] [forgotten_topics_data] rack_id TAG_BUFFER
+        #   max_wait_ms => INT32
+        #   min_bytes => INT32
+        #   max_bytes => INT32
+        #   isolation_level => INT8
+        #   session_id => INT32
+        #   session_epoch => INT32
+        #   topics => topic_id [partitions] TAG_BUFFER
+        #   forgotten_topics_data => topic_id [partitions] TAG_BUFFER
+        #     topic_id => UUID
+        #     partitions => INT32
+        #   rack_id => COMPACT_STRING
+
+        # ToDo: Add full request implementation
+        self.topics = []
+        # => skip all initial fields directly to topics_num length info
+        offset = 4 + 4 + 4 + 1 + 4 + 4
+        topics_num = int.from_bytes(self.content.to_bytes()[offset:offset + 1])
+        for i in range(topics_num - 1):
+            # ToDo: correctly handle offset for more than 1 topic
+            self.topics.append(Topic(self.content.to_bytes()[offset + 1:]))
 
 
 @dataclass
@@ -182,7 +230,7 @@ class APIKeysV3:
             TAG_BUFFER
 
     def __repr__(self):
-        return f"API key = {self.api_key} [{self.min_version} => {self.max_version}]"
+        return f"{self.api_key} [{self.min_version} => {self.max_version}]"
 
 
 @dataclass
@@ -190,13 +238,13 @@ class APIVersionsResponseV3(Content):
     # Ref.: https://kafka.apache.org/protocol.html#The_Messages_ApiVersions
     # ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_BUFFER
     #   error_code => INT16
+    #   api_keys => api_key min_version max_version TAG_BUFFER
     #   throttle_time_ms => INT32
     error_code: int
     api_keys: list[APIKeysV3]
     throttle_time_ms: int
 
     def __post_init__(self):
-        self.api_keys_num = len(self.api_keys) + (len(self.api_keys) > 0)  # stored as 0 for 0 or N + 1 else
         self._bytes = self.to_bytes()
 
     def to_bytes(self):
@@ -205,21 +253,16 @@ class APIVersionsResponseV3(Content):
         # 127 / 01111111 => 126
         #  63 / 00111111 =>  62
         return self.error_code.to_bytes(2, byteorder="big") + \
-            self.api_keys_num.to_bytes(1, byteorder="big") + \
+            get_size_representation(self.api_keys).to_bytes(1, byteorder="big") + \
             b''.join(map(lambda k: k.to_bytes(), self.api_keys)) + \
             self.throttle_time_ms.to_bytes(4, byteorder="big") + \
             TAG_BUFFER
 
 
 @dataclass
-class FetchResponseV16(Content):
+class PartitionsV16:
+    # ToDo: implement all fields
     # Ref.: https://kafka.apache.org/protocol.html#The_Messages_Fetch
-    # Fetch Response (Version: 16) => throttle_time_ms error_code session_id [responses] TAG_BUFFER
-    #   throttle_time_ms => INT32
-    #   error_code => INT16
-    #   session_id => INT32
-    #   responses => topic_id [partitions] TAG_BUFFER
-    #     topic_id => UUID
     #     partitions => partition_index error_code high_watermark last_stable_offset log_start_offset [aborted_transactions] preferred_read_replica records TAG_BUFFER
     #       partition_index => INT32
     #       error_code => INT16
@@ -231,20 +274,52 @@ class FetchResponseV16(Content):
     #         first_offset => INT64
     #       preferred_read_replica => INT32
     #       records => COMPACT_RECORDS
+    partition_index: int
+    error_code: int
+
+    def to_bytes(self):
+        return self.partition_index.to_bytes(4) + \
+            self.error_code.to_bytes(2) + \
+            int(0).to_bytes(8 + 8 + 8 + 1 + 4 + 1 + 1)
+
+
+@dataclass
+class TopicResponsesV16:
+    # Ref.: https://kafka.apache.org/protocol.html#The_Messages_Fetch
+    #   responses => topic_id [partitions] TAG_BUFFER
+    #     topic_id => UUID
+    #     partitions => partition_index error_code high_watermark last_stable_offset log_start_offset [aborted_transactions] preferred_read_replica records TAG_BUFFER
+    topic_id: UUID
+    partitions: list[PartitionsV16]
+
+    def to_bytes(self):
+        return self.topic_id.bytes + \
+            get_size_representation(self.partitions).to_bytes(1, byteorder="big") + \
+            b''.join(map(lambda k: k.to_bytes(), self.partitions)) + \
+            TAG_BUFFER
+
+
+@dataclass
+class FetchResponseV16(Content):
+    # Ref.: https://kafka.apache.org/protocol.html#The_Messages_Fetch
+    # Fetch Response (Version: 16) => throttle_time_ms error_code session_id [responses] TAG_BUFFER
+    #   throttle_time_ms => INT32
+    #   error_code => INT16
+    #   session_id => INT32
+    #   responses => topic_id [partitions] TAG_BUFFER
     throttle_time_ms: int
     error_code: int
     session_id: int
-    responses: list[object]
+    responses: list[TopicResponsesV16]
 
     def __post_init__(self):
-        self.responses_num = len(self.responses) + (len(self.responses) > 0)  # stored as 0 for 0 or N + 1 else
         self._bytes = self.to_bytes()
 
     def to_bytes(self):
         return self.throttle_time_ms.to_bytes(4, byteorder="big") + \
             self.error_code.to_bytes(2, byteorder="big") + \
             self.session_id.to_bytes(4, byteorder="big") + \
-            self.responses_num.to_bytes(1, byteorder="big") + \
+            get_size_representation(self.responses).to_bytes(1, byteorder="big") + \
             b''.join(map(lambda k: k.to_bytes(), self.responses)) + \
             TAG_BUFFER
 
@@ -256,7 +331,6 @@ def main():
     print(f"Client connected: {address}")
     # Receive data from the client
     data = socket.recv(1024)
-    print(f"Received data: {data}")
     request = RequestV2(data)
     print(f"Received request: {request}")
     # Error codes | Ref.: https://kafka.apache.org/protocol.html#protocol_error_codes
@@ -282,13 +356,31 @@ def main():
         # FetchResponseV16 is a flexible version => ResponseHeaderV1
         # Ref.: https://github.com/apache/kafka/blob/3.8.0/clients/src/main/resources/common/message/FetchResponse.json#L51
         header = ResponseHeaderV1(request.header.correlation_id)
-        content = FetchResponseV16(
-            b'',
-            1,
-            error_code,
-            0,
-            []
-        )
+        # Parse Request Content
+        request = FetchRequestV16(data)
+        print(f"Parsed request: {request}")
+        if len(request.topics) == 0:
+            content = FetchResponseV16(
+                b'',
+                1,
+                error_code,
+                0,
+                []
+            )
+        else:
+            # Stage "Fetch with an unknown topic"
+            content = FetchResponseV16(
+                b'',
+                1,
+                error_code,
+                0,
+                [
+                    TopicResponsesV16(
+                        request.topics[0].topic_id,
+                        [PartitionsV16(0, 100)]
+                    )
+                ]
+            )
     else:
         raise NotImplementedError
     response = Message(
