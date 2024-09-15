@@ -3,6 +3,21 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# API Key => [supported versions] mapping for our Kafka implementation
+# Ref.: https://kafka.apache.org/protocol.html#protocol_api_keys
+SUPPORTED_API_KEYS = {
+    1: [16],  # FetchRequestV16
+    # We don't parse the APIVersionsRequest Content => should only support v0 -> v2
+    # Ref.: https://kafka.apache.org/protocol.html#The_Messages_ApiVersions
+    # v4 doesn't exist but is the one the challenge is testing for support... => add a fake v4 support for the challenge
+    # v4 was soon to be released and included thanks to that
+    # Ref.: https://forum.codecrafters.io/t/question-about-handle-apiversions-requests-stage/1743
+    # Support is still exaggerated as we don't implement the Request parameters handling
+    # (client_software_name and client_software_version)
+    18: [0, 1, 2, 4]
+}
+
+
 # No tagged fields for this challenge | Ref.: https://app.codecrafters.io/courses/kafka/stages/wa6
 # => Just COMPACT_ARRAY with no elements => 0 on 1 byte (derived from empirical observations)
 TAG_BUFFER = int(0).to_bytes(1, byteorder="big")
@@ -132,6 +147,22 @@ class RequestV2(Message):
         )
 
 
+@dataclass
+class FetchRequestV16(Message):
+    _bytes: bytes
+    header: RequestHeaderV2
+
+    def __init__(self, _bytes):
+        self._bytes = _bytes
+        size = int.from_bytes(self._bytes[:4], byteorder='big')
+        client_id_length = RequestHeaderV2.get_client_id_length(self._bytes[4:])
+        header_end_index = 4 + RequestHeaderV2.client_id_length_index + 2 + client_id_length
+        super().__init__(
+            size,
+            RequestHeaderV2(self._bytes[4:header_end_index]),
+            Content(self._bytes[header_end_index:])
+        )
+
 
 @dataclass
 class APIKeysV3:
@@ -231,7 +262,10 @@ def main():
     # Error codes | Ref.: https://kafka.apache.org/protocol.html#protocol_error_codes
     # Request API key | Ref.: https://kafka.apache.org/protocol.html#protocol_api_keys
     if request.header.request_api_key == 18:  # API Versions
-        error_code = 0 if request.header.request_api_version in range(4 + 1) else 35
+        # v0, v1, v2 and v4
+        error_code = 0 if request.header.request_api_version in SUPPORTED_API_KEYS[18] else 35
+        # APIVersionsResponseV3 uses ResponseHeaderV0 even though it is a flexible version for back-compatibility
+        # Ref.: https://github.com/apache/kafka/blob/3.8.0/clients/src/main/resources/common/message/ApiVersionsResponse.json#L24-L26
         header = ResponseHeaderV0(request.header.correlation_id)
         content = APIVersionsResponseV3(
             b'',
@@ -243,7 +277,10 @@ def main():
             0
         )
     elif request.header.request_api_key == 1:  # Fetch
-        error_code = 0 if request.header.request_api_version in range(16 + 1) else 35
+        # v16 only
+        error_code = 0 if request.header.request_api_version in SUPPORTED_API_KEYS[1] else 35
+        # FetchResponseV16 is a flexible version => ResponseHeaderV1
+        # Ref.: https://github.com/apache/kafka/blob/3.8.0/clients/src/main/resources/common/message/FetchResponse.json#L51
         header = ResponseHeaderV1(request.header.correlation_id)
         content = FetchResponseV16(
             b'',
