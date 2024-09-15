@@ -3,6 +3,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# No tagged fields for this challenge | Ref.: https://app.codecrafters.io/courses/kafka/stages/wa6
+# => Just COMPACT_ARRAY with no elements => 0 on 1 byte (derived from empirical observations)
+TAG_BUFFER = int(0).to_bytes(1, byteorder="big")
+
+
 @dataclass
 class Header:
     _bytes: bytes
@@ -61,7 +66,6 @@ class RequestHeaderV2(Header):
         self.correlation_id = int.from_bytes(self._bytes[4:8], byteorder="big")
         self.client_id_length = self.get_client_id_length(self._bytes)
         self.client_id = int.from_bytes(self._bytes[10:10 + self.client_id_length], byteorder="big")
-        # No tagged fields for this challenge | Ref.: https://app.codecrafters.io/courses/kafka/stages/wa6
         self.tagged_fields = self._bytes[10 + self.client_id_length:]
 
     @staticmethod
@@ -128,8 +132,6 @@ class RequestV2(Message):
         )
 
 
-TAG_BUFFER = int(0).to_bytes(1, byteorder="big")  # Empirically...
-
 
 @dataclass
 class APIKeysV3:
@@ -141,8 +143,6 @@ class APIKeysV3:
     api_key: int
     min_version: int
     max_version: int
-
-    # no TAG_BUFFER in this challenge
 
     def to_bytes(self):
         return self.api_key.to_bytes(2, byteorder="big") + \
