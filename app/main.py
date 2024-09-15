@@ -1,3 +1,4 @@
+import threading
 from socket import create_server
 from .protocol.base import Message
 from .protocol.RequestV2 import RequestV2
@@ -23,73 +24,93 @@ SUPPORTED_API_KEYS = {
 }
 
 
+def handle_client(socket, address):
+    print(f"Client connected: {address}")
+    try:
+        while True:  # to handle multiple serial connections from this client
+            # Receive data from the client
+            data = socket.recv(1024)
+            request = RequestV2(data)
+            print(f"Received request: {request}")
+            # Error codes | Ref.: https://kafka.apache.org/protocol.html#protocol_error_codes
+            # Request API key | Ref.: https://kafka.apache.org/protocol.html#protocol_api_keys
+            if request.header.request_api_key == 18:  # API Versions
+                # v0, v1, v2 and v4
+                error_code = 0 if request.header.request_api_version in SUPPORTED_API_KEYS[18] else 35
+                # APIVersionsResponseV3 uses ResponseHeaderV0 even though it is a flexible version for back-compatibility
+                # Ref.: https://github.com/apache/kafka/blob/3.8.0/clients/src/main/resources/common/message/ApiVersionsResponse.json#L24-L26
+                header = ResponseHeaderV0(request.header.correlation_id)
+                content = APIVersionsResponseV3(
+                    b'',
+                    error_code,
+                    [
+                        APIKeysV3(18, 4, 4),  # API Versions
+                        APIKeysV3(1, 16, 16),  # Fetch
+                    ],
+                    0
+                )
+            elif request.header.request_api_key == 1:  # Fetch
+                # v16 only
+                error_code = 0 if request.header.request_api_version in SUPPORTED_API_KEYS[1] else 35
+                # FetchResponseV16 is a flexible version => ResponseHeaderV1
+                # Ref.: https://github.com/apache/kafka/blob/3.8.0/clients/src/main/resources/common/message/FetchResponse.json#L51
+                header = ResponseHeaderV1(request.header.correlation_id)
+                # Parse Request Content
+                request = FetchRequestV16(data)
+                print(f"Parsed request: {request}")
+                if len(request.topics) == 0:
+                    content = FetchResponseV16(
+                        b'',
+                        1,
+                        error_code,
+                        0,
+                        []
+                    )
+                else:
+                    # Stage "Fetch with an unknown topic"
+                    content = FetchResponseV16(
+                        b'',
+                        1,
+                        error_code,
+                        0,
+                        [
+                            TopicResponsesV16(
+                                request.topics[0].topic_id,
+                                [PartitionsV16(0, 100)]
+                            )
+                        ]
+                    )
+            else:
+                raise NotImplementedError
+            response = Message(
+                None,
+                header,
+                content
+            )
+            print(f"Sending message: {response} as {response.to_bytes().hex()}")
+            socket.sendall(response.to_bytes())
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        print(f"Closing connection for {address}")
+        socket.close()
+
+
 def main():
     server = create_server(("localhost", 9092), reuse_port=True)
-    socket, address = server.accept()  # wait for client
+    print("Server is listening on port 9092")
 
-    print(f"Client connected: {address}")
+    # Main Server Loop: The main server loop listens for connections and spawns a new thread for each client,
+    # allowing the server to handle multiple clients concurrently.
     while True:
-        # Receive data from the client
-        data = socket.recv(1024)
-        request = RequestV2(data)
-        print(f"Received request: {request}")
-        # Error codes | Ref.: https://kafka.apache.org/protocol.html#protocol_error_codes
-        # Request API key | Ref.: https://kafka.apache.org/protocol.html#protocol_api_keys
-        if request.header.request_api_key == 18:  # API Versions
-            # v0, v1, v2 and v4
-            error_code = 0 if request.header.request_api_version in SUPPORTED_API_KEYS[18] else 35
-            # APIVersionsResponseV3 uses ResponseHeaderV0 even though it is a flexible version for back-compatibility
-            # Ref.: https://github.com/apache/kafka/blob/3.8.0/clients/src/main/resources/common/message/ApiVersionsResponse.json#L24-L26
-            header = ResponseHeaderV0(request.header.correlation_id)
-            content = APIVersionsResponseV3(
-                b'',
-                error_code,
-                [
-                    APIKeysV3(18, 4, 4),  # API Versions
-                    APIKeysV3(1, 16, 16),  # Fetch
-                ],
-                0
-            )
-        elif request.header.request_api_key == 1:  # Fetch
-            # v16 only
-            error_code = 0 if request.header.request_api_version in SUPPORTED_API_KEYS[1] else 35
-            # FetchResponseV16 is a flexible version => ResponseHeaderV1
-            # Ref.: https://github.com/apache/kafka/blob/3.8.0/clients/src/main/resources/common/message/FetchResponse.json#L51
-            header = ResponseHeaderV1(request.header.correlation_id)
-            # Parse Request Content
-            request = FetchRequestV16(data)
-            print(f"Parsed request: {request}")
-            if len(request.topics) == 0:
-                content = FetchResponseV16(
-                    b'',
-                    1,
-                    error_code,
-                    0,
-                    []
-                )
-            else:
-                # Stage "Fetch with an unknown topic"
-                content = FetchResponseV16(
-                    b'',
-                    1,
-                    error_code,
-                    0,
-                    [
-                        TopicResponsesV16(
-                            request.topics[0].topic_id,
-                            [PartitionsV16(0, 100)]
-                        )
-                    ]
-                )
-        else:
-            raise NotImplementedError
-        response = Message(
-            None,
-            header,
-            content
-        )
-        print(f"Sending message: {response} as {response.to_bytes().hex()}")
-        socket.sendall(response.to_bytes())
+        # Wait for a client connection
+        socket, address = server.accept()
+
+        # Threading: Each client is handled in a separate thread created using the threading.Thread class.
+        # The handle_client function will now handle a single client connection (with possible subsequent requests).
+        client_thread = threading.Thread(target=handle_client, args=(socket, address))
+        client_thread.start()
+        # Connection Closing: When the client disconnects or an error occurs, the connection is closed.
 
 
 if __name__ == "__main__":
