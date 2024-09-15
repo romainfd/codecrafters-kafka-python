@@ -28,67 +28,68 @@ def main():
     socket, address = server.accept()  # wait for client
 
     print(f"Client connected: {address}")
-    # Receive data from the client
-    data = socket.recv(1024)
-    request = RequestV2(data)
-    print(f"Received request: {request}")
-    # Error codes | Ref.: https://kafka.apache.org/protocol.html#protocol_error_codes
-    # Request API key | Ref.: https://kafka.apache.org/protocol.html#protocol_api_keys
-    if request.header.request_api_key == 18:  # API Versions
-        # v0, v1, v2 and v4
-        error_code = 0 if request.header.request_api_version in SUPPORTED_API_KEYS[18] else 35
-        # APIVersionsResponseV3 uses ResponseHeaderV0 even though it is a flexible version for back-compatibility
-        # Ref.: https://github.com/apache/kafka/blob/3.8.0/clients/src/main/resources/common/message/ApiVersionsResponse.json#L24-L26
-        header = ResponseHeaderV0(request.header.correlation_id)
-        content = APIVersionsResponseV3(
-            b'',
-            error_code,
-            [
-                APIKeysV3(18, 4, 4),  # API Versions
-                APIKeysV3(1, 16, 16),  # Fetch
-            ],
-            0
-        )
-    elif request.header.request_api_key == 1:  # Fetch
-        # v16 only
-        error_code = 0 if request.header.request_api_version in SUPPORTED_API_KEYS[1] else 35
-        # FetchResponseV16 is a flexible version => ResponseHeaderV1
-        # Ref.: https://github.com/apache/kafka/blob/3.8.0/clients/src/main/resources/common/message/FetchResponse.json#L51
-        header = ResponseHeaderV1(request.header.correlation_id)
-        # Parse Request Content
-        request = FetchRequestV16(data)
-        print(f"Parsed request: {request}")
-        if len(request.topics) == 0:
-            content = FetchResponseV16(
+    while True:
+        # Receive data from the client
+        data = socket.recv(1024)
+        request = RequestV2(data)
+        print(f"Received request: {request}")
+        # Error codes | Ref.: https://kafka.apache.org/protocol.html#protocol_error_codes
+        # Request API key | Ref.: https://kafka.apache.org/protocol.html#protocol_api_keys
+        if request.header.request_api_key == 18:  # API Versions
+            # v0, v1, v2 and v4
+            error_code = 0 if request.header.request_api_version in SUPPORTED_API_KEYS[18] else 35
+            # APIVersionsResponseV3 uses ResponseHeaderV0 even though it is a flexible version for back-compatibility
+            # Ref.: https://github.com/apache/kafka/blob/3.8.0/clients/src/main/resources/common/message/ApiVersionsResponse.json#L24-L26
+            header = ResponseHeaderV0(request.header.correlation_id)
+            content = APIVersionsResponseV3(
                 b'',
-                1,
                 error_code,
-                0,
-                []
-            )
-        else:
-            # Stage "Fetch with an unknown topic"
-            content = FetchResponseV16(
-                b'',
-                1,
-                error_code,
-                0,
                 [
-                    TopicResponsesV16(
-                        request.topics[0].topic_id,
-                        [PartitionsV16(0, 100)]
-                    )
-                ]
+                    APIKeysV3(18, 4, 4),  # API Versions
+                    APIKeysV3(1, 16, 16),  # Fetch
+                ],
+                0
             )
-    else:
-        raise NotImplementedError
-    response = Message(
-        None,
-        header,
-        content
-    )
-    print(f"Sending message: {response} as {response.to_bytes().hex()}")
-    socket.sendall(response.to_bytes())
+        elif request.header.request_api_key == 1:  # Fetch
+            # v16 only
+            error_code = 0 if request.header.request_api_version in SUPPORTED_API_KEYS[1] else 35
+            # FetchResponseV16 is a flexible version => ResponseHeaderV1
+            # Ref.: https://github.com/apache/kafka/blob/3.8.0/clients/src/main/resources/common/message/FetchResponse.json#L51
+            header = ResponseHeaderV1(request.header.correlation_id)
+            # Parse Request Content
+            request = FetchRequestV16(data)
+            print(f"Parsed request: {request}")
+            if len(request.topics) == 0:
+                content = FetchResponseV16(
+                    b'',
+                    1,
+                    error_code,
+                    0,
+                    []
+                )
+            else:
+                # Stage "Fetch with an unknown topic"
+                content = FetchResponseV16(
+                    b'',
+                    1,
+                    error_code,
+                    0,
+                    [
+                        TopicResponsesV16(
+                            request.topics[0].topic_id,
+                            [PartitionsV16(0, 100)]
+                        )
+                    ]
+                )
+        else:
+            raise NotImplementedError
+        response = Message(
+            None,
+            header,
+            content
+        )
+        print(f"Sending message: {response} as {response.to_bytes().hex()}")
+        socket.sendall(response.to_bytes())
 
 
 if __name__ == "__main__":
